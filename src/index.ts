@@ -1,37 +1,71 @@
 import fs from 'fs/promises'
+import path from 'path'
 import { Gitlab } from '@gitbeaker/rest'
-import { simpleGit } from 'simple-git'
+import { CheckRepoActions, simpleGit } from 'simple-git'
+import { CronJob } from 'cron'
+
+import { dirExists } from './utils.ts'
+import { logger } from './logger.ts'
 
 if (!process.env.GITLAB_TOKEN) throw new Error('Missing env GITLAB_TOKEN')
-process.chdir('repos')
+if (!(await dirExists('repos'))) await fs.mkdir('repos')
 
 const api = new Gitlab({
   token: process.env.GITLAB_TOKEN,
 })
-const git = simpleGit()
 
 const pn = (await api.Groups.all()).find((g) => g.path === 'polinetwork')
 if (!pn) throw new Error('You need to be part of the PoliNetwork group')
 
-const repos = await api.Groups.allProjects(pn.id)
-repos.length = 2
+const syncJob = CronJob.from({
+  cronTime: '0 0 */24 * * *', // every 24 hours
+  onTick: (cb) => {
+    logger.info('Running sync job')
+    syncAll()
+      .catch((e) => logger.error(e))
+      .finally(() => cb())
+  },
+  onComplete: () => {
+    logger.info('Sync job completed')
+  },
+  runOnInit: true,
+})
+syncJob.start()
 
-async function dirExists(dir: string) {
-  try {
-    await fs.stat(dir)
-    return true
-  } catch {
-    return false
+async function syncAll() {
+  logger.info('Fetching all repositories')
+  const repos = await api.Groups.allProjects(pn!.id)
+
+  // for testing purposes
+  if (process.env.TRUNCATE_REPOS) {
+    const n = parseInt(process.env.TRUNCATE_REPOS)
+    if (n > 0) repos.length = n
   }
-}
+  logger.info(`Found ${repos.length} repositories`)
 
-for (const repo of repos) {
-  const dir = repo.path
-  if (await dirExists(dir)) {
-    console.log(`Pulling ${dir}`)
-    await git.pull(dir)
-  } else {
-    console.log(`Cloning ${dir}`)
-    await git.clone(repo.http_url_to_repo)
+  for (const repo of repos) {
+    const dir = path.join('repos', repo.path)
+    if (await dirExists(dir)) {
+      const git = simpleGit(dir)
+      logger.info(`Fetching updates for ${repo.path}`)
+      if (await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT)) {
+        await git.fetch()
+        const res = await git.pull()
+        if (res.files.length) {
+          logger.info(
+            `Successfully pulled ${repo.path}: +${res.summary.changes} -${res.summary.deletions} ~${res.summary.insertions}`
+          )
+        }
+      } else {
+        logger.error(`Not a git repository: ${repo.path}. How did this happen?`)
+      }
+    } else {
+      logger.info(`Cloning ${repo.path}`)
+      const res = await simpleGit('repos').clone(repo.http_url_to_repo, {
+        '--filter': 'tree:0',
+        '--single-branch': null,
+      })
+      logger.info(`Successfully cloned ${repo.path}: +${res}`)
+    }
   }
 }
