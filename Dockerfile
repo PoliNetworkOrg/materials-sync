@@ -1,9 +1,19 @@
-FROM node:22-alpine
-WORKDIR /
-VOLUME [ "/repos" ]
-COPY package.json .
-COPY pnpm-lock.yaml .
-RUN pnpm install
-COPY . .
-RUN pnpm build
+FROM node:22-alpine AS base
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN corepack enable
+COPY . /app
+WORKDIR /app
+
+FROM base AS prod-deps
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --prod --frozen-lockfile
+
+FROM base AS build
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+RUN pnpm run build
+
+FROM base
+VOLUME [ "/app/repos" ]
+COPY --from=prod-deps /app/node_modules /app/node_modules
+COPY --from=build /app/out /app/out
 CMD ["pnpm", "start"]
