@@ -22,7 +22,10 @@ const syncJob = CronJob.from({
   onTick: (cb) => {
     logger.info('Running sync job')
     syncAll()
-      .catch((e) => logger.error(e))
+      .catch((e) => {
+        logger.error('Uncaught error in sync job')
+        logger.error(e)
+      })
       .finally(() => cb())
   },
   onComplete: () => {
@@ -34,7 +37,7 @@ syncJob.start()
 
 async function syncAll() {
   logger.info('Fetching all repositories')
-  const repos = await api.Groups.allProjects(pn!.id)
+  const repos = await api.Groups.allProjects(pn!.id, { visibility: 'public' })
 
   // for testing purposes
   if (process.env.TRUNCATE_REPOS) {
@@ -49,23 +52,32 @@ async function syncAll() {
       const git = simpleGit(dir)
       logger.info(`Fetching updates for ${repo.path}`)
       if (await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT)) {
-        await git.fetch()
-        const res = await git.pull()
-        if (res.files.length) {
-          logger.info(
-            `Successfully pulled ${repo.path}: +${res.summary.changes} -${res.summary.deletions} ~${res.summary.insertions}`
-          )
+        try {
+          await git.fetch()
+          const res = await git.pull()
+          if (res.files.length)
+            logger.info(
+              `Successfully pulled ${repo.path}: +${res.summary.changes} -${res.summary.deletions} ~${res.summary.insertions}`
+            )
+        } catch (e) {
+          logger.error(`Failed to pull ${repo.path}`)
+          logger.error(e)
         }
       } else {
         logger.error(`Not a git repository: ${repo.path}. How did this happen?`)
       }
     } else {
       logger.info(`Cloning ${repo.path}`)
-      const res = await simpleGit('repos').clone(repo.http_url_to_repo, {
-        '--filter': 'tree:0',
-        '--single-branch': null,
-      })
-      logger.info(`Successfully cloned ${repo.path}: +${res}`)
+      try {
+        const res = await simpleGit('repos').clone(repo.http_url_to_repo, {
+          '--filter': 'tree:0',
+          '--single-branch': null,
+        })
+        logger.info(`Successfully cloned ${repo.path}: +${res}`)
+      } catch (e) {
+        logger.error(`Failed to clone ${repo.path}`)
+        logger.error(e)
+      }
     }
   }
 }
